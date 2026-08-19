@@ -1,0 +1,30 @@
+node: talker
+package: demo_nodes_cpp
+status: stable
+description: >
+  Node demo, publish một chuỗi đếm số ("Hello World: N") theo chu kỳ cố định,
+  dùng để test luồng publish/subscribe cơ bản.
+
+publishes:
+  - topic: /chatter
+    type: std_msgs/msg/String
+    description: Chuỗi demo tăng dần theo thời gian
+
+subscribes: []
+
+services_provided: []
+services_used: []
+
+parameters:
+  - name: rate_hz
+    type: double
+    default: 1.0
+    description: Tần số publish message
+
+dependencies:
+  - std_msgs
+
+notes: >
+  Node mẫu đi kèm ROS2, dùng để kiểm thử nhanh việc bộ MCP tool hoạt động
+  đúng (list_nodes, get_node_info, echo_topic, validate_node) trước khi
+  áp dụng cho node thật của dự án.

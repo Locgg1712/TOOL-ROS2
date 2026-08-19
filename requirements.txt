@@ -1,0 +1,6 @@
+# rclpy, rosidl_runtime_py, rcl_interfaces come from your sourced ROS2
+# installation (not pip) — make sure you've run:
+#   source /opt/ros/<distro>/setup.bash
+# before installing/running this server.
+
+mcp[cli]>=1.0.0

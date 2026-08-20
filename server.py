@@ -54,6 +54,13 @@ _ALLOW_PUBLISH = os.environ.get("ROS2_MCP_ALLOW_PUBLISH", "0") == "1"
 # MANIFEST_SCHEMA.md for the format and naming convention.
 _MANIFEST_DIR = Path(os.environ.get("ROS2_MCP_MANIFEST_DIR", "./ros2_manifests")).resolve()
 
+# ROS2 node names must be unique on the graph. If multiple AI clients (Claude,
+# Codex, Antigravity, ...) each launch their own copy of this server as a
+# separate stdio subprocess, they'd otherwise collide on the same fixed name.
+# Default to a per-process unique name; override explicitly if you want a
+# stable, predictable name instead (e.g. for a single always-on client).
+_NODE_NAME = os.environ.get("ROS2_MCP_NODE_NAME", f"ai_mcp_bridge_{os.getpid()}")
+
 _node = None
 _executor: Optional[SingleThreadedExecutor] = None
 _spin_thread: Optional[threading.Thread] = None
@@ -68,7 +75,7 @@ def _ensure_node():
         if _node is not None:
             return
         rclpy.init(args=None)
-        _node = rclpy.create_node("claude_mcp_bridge")
+        _node = rclpy.create_node(_NODE_NAME)
         _executor = SingleThreadedExecutor()
         _executor.add_node(_node)
 
@@ -323,7 +330,7 @@ def publish_message(topic: str, msg_type: str, fields: str, confirm: bool = Fals
     """
     if not _ALLOW_PUBLISH:
         return json.dumps({"error": "Publishing is disabled on this server. "
-                                      "Set ROS2_MCP_ALLOW_PUBLISH=1 in the environment to enable it."})
+                                     "Set ROS2_MCP_ALLOW_PUBLISH=1 in the environment to enable it."})
     if not confirm:
         return json.dumps({"error": "Set confirm=true to actually publish. "
                                      "This will send a real message onto the ROS2 graph."})

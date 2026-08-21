@@ -101,7 +101,10 @@ def _msg_to_dict(msg) -> dict:
 def list_nodes() -> str:
     """List all currently running ROS2 node names and namespaces."""
     _ensure_node()
-    names = _node.get_node_names_and_namespaces()
+    try:
+        names = _node.get_node_names_and_namespaces()
+    except Exception as e:
+        return json.dumps({"error": f"Failed to list nodes: {e}"})
     return json.dumps([{"name": n, "namespace": ns} for n, ns in names], indent=2)
 
 
@@ -109,7 +112,10 @@ def list_nodes() -> str:
 def list_topics() -> str:
     """List all active ROS2 topics with their message types."""
     _ensure_node()
-    topics = _node.get_topic_names_and_types()
+    try:
+        topics = _node.get_topic_names_and_types()
+    except Exception as e:
+        return json.dumps({"error": f"Failed to list topics: {e}"})
     return json.dumps([{"topic": t, "types": ty} for t, ty in topics], indent=2)
 
 
@@ -117,8 +123,11 @@ def list_topics() -> str:
 def get_topic_info(topic: str) -> str:
     """Get publisher/subscriber counts and node names for a specific topic."""
     _ensure_node()
-    pubs = _node.get_publishers_info_by_topic(topic)
-    subs = _node.get_subscriptions_info_by_topic(topic)
+    try:
+        pubs = _node.get_publishers_info_by_topic(topic)
+        subs = _node.get_subscriptions_info_by_topic(topic)
+    except Exception as e:
+        return json.dumps({"error": f"Failed to get info for topic '{topic}': {e}"})
     return json.dumps({
         "topic": topic,
         "publisher_count": len(pubs),
@@ -132,19 +141,29 @@ def get_topic_info(topic: str) -> str:
 def list_services() -> str:
     """List all active ROS2 services with their types."""
     _ensure_node()
-    services = _node.get_service_names_and_types()
+    try:
+        services = _node.get_service_names_and_types()
+    except Exception as e:
+        return json.dumps({"error": f"Failed to list services: {e}"})
     return json.dumps([{"service": s, "types": ty} for s, ty in services], indent=2)
 
 
 @mcp.tool()
 def get_node_info(node_name: str, namespace: str = "/") -> str:
     """Get the publishers, subscribers, and services exposed by a specific node.
-    node_name should be given without leading slash, e.g. 'talker'."""
+    node_name should be given without leading slash, e.g. 'talker'.
+    If the node is not found, returns an error with a hint to check list_nodes."""
     _ensure_node()
     full = f"{namespace.rstrip('/')}/{node_name}" if namespace != "/" else f"/{node_name}"
-    pubs = _node.get_publisher_names_and_types_by_node(node_name, namespace)
-    subs = _node.get_subscriber_names_and_types_by_node(node_name, namespace)
-    srvs = _node.get_service_names_and_types_by_node(node_name, namespace)
+    try:
+        pubs = _node.get_publisher_names_and_types_by_node(node_name, namespace)
+        subs = _node.get_subscriber_names_and_types_by_node(node_name, namespace)
+        srvs = _node.get_service_names_and_types_by_node(node_name, namespace)
+    except Exception as e:
+        return json.dumps({
+            "error": f"Could not get info for node '{full}': {e}",
+            "hint": "Use list_nodes to verify the node name and namespace.",
+        })
     return json.dumps({
         "node": full,
         "publishers": [{"topic": t, "types": ty} for t, ty in pubs],
@@ -207,13 +226,20 @@ def validate_node(node_name: str, namespace: str = "/") -> str:
         return json.dumps({"error": str(e)})
 
     _ensure_node()
-    live_pubs = {t for t, _ in _node.get_publisher_names_and_types_by_node(node_name, namespace)}
-    live_subs = {t for t, _ in _node.get_subscriber_names_and_types_by_node(node_name, namespace)}
-    live_srvs = {s for s, _ in _node.get_service_names_and_types_by_node(node_name, namespace)}
+    try:
+        live_pubs = {t for t, _ in _node.get_publisher_names_and_types_by_node(node_name, namespace)}
+        live_subs = {t for t, _ in _node.get_subscriber_names_and_types_by_node(node_name, namespace)}
+        live_srvs = {s for s, _ in _node.get_service_names_and_types_by_node(node_name, namespace)}
+    except Exception as e:
+        return json.dumps({
+            "error": f"Could not read live state for node '{node_name}': {e}",
+            "hint": "Use list_nodes to verify the node name and namespace.",
+        })
 
-    declared_pubs = {p["topic"] for p in manifest.get("publishes", [])}
-    declared_subs = {s["topic"] for s in manifest.get("subscribes", [])}
-    declared_srvs = {s["service"] for s in manifest.get("services_provided", [])}
+    # Guard against malformed manifest entries that are missing the key field.
+    declared_pubs = {p["topic"] for p in manifest.get("publishes", []) if "topic" in p}
+    declared_subs = {s["topic"] for s in manifest.get("subscribes", []) if "topic" in s}
+    declared_srvs = {s["service"] for s in manifest.get("services_provided", []) if "service" in s}
 
     def _diff(declared, live):
         return {

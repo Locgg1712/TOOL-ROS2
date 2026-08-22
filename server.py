@@ -52,7 +52,12 @@ _ALLOW_PUBLISH = os.environ.get("ROS2_MCP_ALLOW_PUBLISH", "0") == "1"
 
 # Directory holding one YAML manifest per node (design intent). See
 # MANIFEST_SCHEMA.md for the format and naming convention.
-_MANIFEST_DIR = Path(os.environ.get("ROS2_MCP_MANIFEST_DIR", "./ros2_manifests")).resolve()
+# Resolve manifest directory relative to this file's location (not the process
+# CWD, which may differ when spawned by Claude Desktop / Code from home dir).
+_MANIFEST_DIR = Path(
+    os.environ.get("ROS2_MCP_MANIFEST_DIR",
+                   str(Path(__file__).parent / "ros2_manifests"))
+).resolve()
 
 # ROS2 node names must be unique on the graph. If multiple AI clients (Claude,
 # Codex, Antigravity, ...) each launch their own copy of this server as a
@@ -283,12 +288,23 @@ def echo_topic(topic: str, msg_type: str, count: int = 3, timeout_sec: float = 5
     done.wait(timeout=timeout_sec)
     _node.destroy_subscription(sub)
 
-    return json.dumps({
+    timed_out = len(captured) < count
+    result: dict = {
         "topic": topic,
         "captured_count": len(captured),
         "messages": captured,
-        "timed_out": len(captured) < count,
-    }, indent=2)
+        "timed_out": timed_out,
+    }
+    if timed_out:
+        result["hint"] = (
+            f"Received {len(captured)}/{count} messages in {timeout_sec}s. "
+            "If captured_count is 0 and a publisher exists (check get_topic_info), "
+            "the most likely cause is a QoS mismatch: this subscriber uses "
+            "Reliable/Volatile QoS, but many sensor topics (LaserScan, Image, "
+            "PointCloud2, etc.) publish with Best-Effort QoS. "
+            "Do NOT conclude the node is not publishing based on this result alone."
+        )
+    return json.dumps(result, indent=2)
 
 
 @mcp.tool()

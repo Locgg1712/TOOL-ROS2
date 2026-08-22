@@ -43,7 +43,13 @@ if hasattr(sys.stderr, 'reconfigure'):
         pass
 
 
-_MANIFEST_DIR = Path(os.environ.get("ROS2_MCP_MANIFEST_DIR", "./ros2_manifests")).resolve()
+# Resolve manifest directory relative to this file's location (not the process
+# CWD, which may differ when invoked via /usr/local/bin symlink or from a
+# different working directory).
+_MANIFEST_DIR = Path(
+    os.environ.get("ROS2_MCP_MANIFEST_DIR",
+                   str(Path(__file__).parent / "ros2_manifests"))
+).resolve()
 
 # ── ANSI color helpers ────────────────────────────────────────────────────────
 
@@ -345,6 +351,13 @@ def cmd_echo(args):
     print()
     if len(captured) < count:
         print(_yellow(f"  ⚠ Timed out — captured {len(captured)}/{count} messages."))
+        if len(captured) == 0:
+            print(_dim(
+                "  Tip: 0 messages may indicate a QoS mismatch, not a silent publisher.\n"
+                "  This subscriber uses Reliable/Volatile QoS. Sensor topics (LaserScan,\n"
+                "  Image, PointCloud2…) often publish with Best-Effort QoS. Run\n"
+                "  'ros2 topic info --verbose <topic>' to check publisher QoS settings."
+            ))
     else:
         print(_green(f"  ✓ Captured {len(captured)} message(s)."))
 
@@ -584,6 +597,13 @@ def main():
         sys.exit(1)
     finally:
         print()  # trailing newline for clean output
+        # Cleanly shut down rclpy to avoid DDS warnings in stderr.
+        try:
+            import rclpy
+            if rclpy.ok():
+                rclpy.shutdown()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

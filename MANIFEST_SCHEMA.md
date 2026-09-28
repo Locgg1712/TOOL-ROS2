@@ -75,3 +75,7 @@ Kết quả `validate_node` trả về 2 loại lệch cho mỗi nhóm (publish/
 ## Ví dụ
 
 Xem `ros2_manifests/example_talker.yaml` đi kèm.
+
+## Liên quan: multirobot_lint
+
+Manifest mô tả **ý định thiết kế ở tầng giao diện** (topic/service/param). Bộ scan tĩnh `multirobot_lint.py` (xem `MULTIROBOT_LINT.md`) bổ sung ở tầng khác: các **cạm bẫy code** thường gặp khi hệ thống multi-robot chuyển từ sim sang thật (timeout, an toàn, shutdown...). Hai công cụ không thay thế nhau — validate_node kiểm tra "node có làm đúng như khai báo không", multirobot_lint kiểm tra "code có mắc các lỗi kinh điển sim→thật không".

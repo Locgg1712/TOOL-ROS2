@@ -22,6 +22,10 @@ tế là về hành vi trên phần cứng.
   trong sim (1 máy, loopback) có thể tụt xuống 20Hz thật khi phải qua WiFi.
 - Trước khi kết luận tần số publish đạt yêu cầu, dùng `echo_topic` để đo tần số **trên
   chính hệ thống đang test**, không suy từ số liệu đã đo trong sim.
+- `multirobot_lint` check 1 bắt một dạng cụ thể của lỗi này ở tầng code: timeout so
+  sánh bằng thời điểm *nhận* message thay vì `header.stamp` của chính message — gần
+  như vô hại trong sim (độ trễ ~0) nhưng có thể che giấu dữ liệu cũ khi chạy qua mạng
+  thật.
 
 ## 2. Cảm biến
 
@@ -42,6 +46,9 @@ tế là về hành vi trên phần cứng.
 - **Quy tắc bắt buộc khi chuyển sang thật:** luôn publish giá trị nhỏ nhất có ý nghĩa
   trước, quan sát phản hồi qua `echo_topic` trên topic cảm biến liên quan (odometry,
   IMU...), rồi mới tăng dần. Không nhảy thẳng lên giá trị đã dùng trong sim.
+- `multirobot_lint` check 3 quét các hằng số dạng `MAX_*_VEL`/`MAX_*_ACCEL` không có
+  comment tham chiếu tới thông số phần cứng thật — dùng như một danh sách việc cần
+  đối chiếu trước khi tăng giá trị trên robot thật.
 
 ## 4. An toàn vật lý
 
@@ -54,6 +61,9 @@ tế là về hành vi trên phần cứng.
   service dừng) trước khi test hành vi mới, không chỉ trước khi test hành vi nguy hiểm
   rõ ràng — hành vi tưởng chừng vô hại (xoay chậm) vẫn có thể gây hại nếu môi trường
   khác giả định.
+- `multirobot_lint` check 4 (ngưỡng an toàn < 2× bán kính robot) và check 8 (thiếu
+  publish vận tốc 0 khi shutdown/crash) là hai check trực tiếp nhắm vào an toàn vật lý
+  — chạy trước khi cắm điện robot thật lần đầu.
 
 ## 5. Mạng & discovery (DDS)
 
@@ -65,8 +75,9 @@ tế là về hành vi trên phần cứng.
   lỗi logic code trong khi thực chất là lỗi mạng/discovery.
 - Nếu `list_nodes` trả về ít node hơn kỳ vọng trên hệ thống thật, đừng vội kết luận
   node chưa chạy — cân nhắc khả năng discovery bị chặn (kiểm tra `ROS_DOMAIN_ID`
-  trùng khớp giữa các máy, kiểm tra multicast có bị firewall chặn không) trước khi
-  chẩn đoán sâu vào code.
+  trùng khớp giữa các máy — `multirobot_lint` check 9 quét lệch giá trị này giữa các
+  file cấu hình/script trong repo trước cả khi bạn kịp SSH vào từng máy để so tay;
+  kiểm tra multicast có bị firewall chặn không) trước khi chẩn đoán sâu vào code.
 
 ## 6. QoS thực tế khác QoS mặc định trong sim
 
@@ -82,14 +93,16 @@ tế là về hành vi trên phần cứng.
 
 ## 7. Checklist trước khi chuyển từ sim sang robot thật
 
-1. Đã xác nhận rõ với người dùng đây là robot thật, không phải sim.
-2. Đã kiểm tra `list_nodes`/`list_topics` trên chính hệ thống thật (không dùng lại
+1. Đã chạy `scan_multirobot_pitfalls` trên toàn bộ source (không cần robot thật để
+   làm bước này) và đã xem/xử lý các finding, đặc biệt severity `error`/`warning`.
+2. Đã xác nhận rõ với người dùng đây là robot thật, không phải sim.
+3. Đã kiểm tra `list_nodes`/`list_topics` trên chính hệ thống thật (không dùng lại
    kết quả từ lần test sim).
-3. Đã đo tần số/giá trị thật qua `echo_topic`, so sánh với kỳ vọng từ sim — nếu lệch
+4. Đã đo tần số/giá trị thật qua `echo_topic`, so sánh với kỳ vọng từ sim — nếu lệch
    nhiều, tìm hiểu nguyên nhân trước khi tiếp tục.
-4. Nếu cần `publish_message`: bắt đầu với giá trị nhỏ, có người giám sát, có phương án
+5. Nếu cần `publish_message`: bắt đầu với giá trị nhỏ, có người giám sát, có phương án
    dừng khẩn cấp.
-5. Không dùng lại nguyên các con số tham số (tốc độ, gain, threshold) đã tune trong
+6. Không dùng lại nguyên các con số tham số (tốc độ, gain, threshold) đã tune trong
    sim mà không kiểm chứng lại — nêu rõ với người dùng đây là điểm cần tune lại,
    không phải copy nguyên.
 

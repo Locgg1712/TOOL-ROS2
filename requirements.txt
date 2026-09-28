@@ -1,7 +1,12 @@
 # rclpy, rosidl_runtime_py, rcl_interfaces come from your sourced ROS2
 # installation (not pip) — make sure you've run:
 #   source /opt/ros/<distro>/setup.bash
-# before installing/running this server.
+# before installing/running server.py or cli.py's live-graph commands.
+#
+# multirobot_lint.py (the static pitfall scanner) needs NONE of the above —
+# it only needs the standard library. pytest below is only required to run
+# test/test_multirobot_lint_self.py locally/under colcon test.
 
 mcp[cli]>=1.0.0
 pyyaml>=6.0
+pytest>=7.0

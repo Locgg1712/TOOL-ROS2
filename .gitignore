@@ -26,3 +26,11 @@ Thumbs.db
 
 # Skill runtime artifacts (not source)
 .agents/skills/ros2-mcp/LICENSE_NOTIFICATION.txt
+
+# Test tooling
+.pytest_cache/
+install/
+log/
+
+# multirobot_lint reports written by CI/local runs
+multirobot-lint-report.json

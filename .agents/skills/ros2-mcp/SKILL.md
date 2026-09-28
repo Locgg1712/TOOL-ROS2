@@ -5,9 +5,12 @@ description: >-
   about running nodes, topics, services, or messages in their ROS2 environment.
   Supports listing nodes/topics/services, echoing live messages, calling
   services, validating node manifests against runtime state, diagnosing
-  communication errors (QoS mismatch, wrong namespace, missing publisher), and
-  generating manifest YAML for undocumented nodes. Works on localhost via shell
-  commands. For remote machines the user must SSH and run commands manually.
+  communication errors (QoS mismatch, wrong namespace, missing publisher),
+  generating manifest YAML for undocumented nodes, and statically scanning
+  source code for known ROS2 multi-robot sim-to-real pitfalls (no running
+  system or sourced ROS2 environment required for that last one). Works on
+  localhost via shell commands. For remote machines the user must SSH and run
+  commands manually.
 ---
 
 # ROS2 MCP — Live System Inspector & Debugger
@@ -17,12 +20,16 @@ description: >-
 This skill gives you direct visibility into a running ROS2 system. It uses the
 `scripts/ros2_cli.py` helper to introspect the graph, capture real messages, call
 services, diff manifest declarations against runtime state, and reason over the
-results to diagnose problems.
+results to diagnose problems. It also bundles `scripts/multirobot_lint.py`, a
+static source-code scanner for known ROS2 multi-robot pitfalls that needs
+**no ROS2 environment and no running system at all** — it's the only part of
+this skill you can use before `source`ing anything.
 
 > [!IMPORTANT]
-> **ROS2 must be sourced before running any command.** Always prefix with
-> `source /opt/ros/<distro>/setup.bash &&` or confirm the user has already done so.
-> If `rclpy` cannot be imported, the script will print a clear error and exit.
+> **ROS2 must be sourced before running any live-system command.** Always
+> prefix with `source /opt/ros/<distro>/setup.bash &&`, or confirm the user
+> has already done so. If `rclpy` cannot be imported, the script will print a
+> clear error and exit. `lint-multirobot` is the one exception — see below.
 
 > [!NOTE]
 > **Manifest directory**: By default `./ros2_manifests/` relative to wherever you
@@ -47,17 +54,47 @@ python3 scripts/ros2_cli.py validate talker --output /tmp/validate.json
 
 # Auto-generate a manifest YAML for a node
 python3 scripts/ros2_cli.py generate-manifest talker --output /tmp/talker_manifest.yaml
+
+# Static multi-robot pitfall scan — NO sourced ROS2 needed, works on plain source
+python3 scripts/ros2_cli.py lint-multirobot ./src --output /tmp/lint.json
+python3 scripts/ros2_cli.py lint-multirobot ./src --fix
 ```
 
 ---
 
-## Utility Script
+## Utility Scripts
 
-All operations use **one script** with subcommands:
+Two self-contained scripts, no cross-dependencies beyond each other where noted:
 
 ```bash
 python3 scripts/ros2_cli.py <subcommand> [args] --output <file>
 ```
+
+### 0. `lint-multirobot` — Static multi-robot pitfall scan (read this first if source is available)
+
+```bash
+python3 scripts/ros2_cli.py lint-multirobot ./src --output /tmp/lint.json
+python3 scripts/ros2_cli.py lint-multirobot ./src --fix                 # apply safe auto-fixes
+python3 scripts/ros2_cli.py lint-list-checks                            # list all 9 checks
+```
+
+This is pure static analysis (AST + regex over `.py`/`.yaml`/shell files) via
+`scripts/multirobot_lint.py` — it needs no `rclpy`, no sourced ROS2
+environment, and no running system. **Run this before anything else if the
+user has source code available**, even before checking whether a system is
+running: it catches sim-to-real pitfalls (timeout logic using receipt time
+instead of `header.stamp`, ignored anomaly-flag returns, safety margins
+smaller than 2x the robot radius, missing shutdown zero-velocity publish,
+`ROS_DOMAIN_ID` mismatches across files, etc.) that no amount of live
+introspection will reveal if the system hasn't been run on real hardware yet.
+
+`--fix` only applies mechanically-safe changes (inserted TODO comments,
+docstring disclaimers) — it never invents a real physical constant (robot
+radius, motor limits) it doesn't have. Findings needing that are reported
+with a TODO for a human to fill in. See `MULTIROBOT_LINT.md` at the repo root
+for the full check list and design rationale.
+
+---
 
 ### 1. `nodes` — List running nodes
 
@@ -212,6 +249,15 @@ publishers/subscribers/services pre-filled. User should review and add
 
 Follow this sequence for every debugging request:
 
+### Step 0 — Static scan first, if source is available
+```bash
+python3 scripts/ros2_cli.py lint-multirobot . --output /tmp/lint.json
+```
+This needs nothing sourced and no system running — do it before Step 1 whenever
+the user has given you a repo/source tree, since it's strictly cheaper than
+live introspection and catches a different class of bug (code-level pitfalls,
+not runtime state).
+
 ### Step 1 — Confirm system is running
 ```bash
 python3 scripts/ros2_cli.py nodes --output /tmp/nodes.json
@@ -246,7 +292,8 @@ Look for ERROR/WARN entries. Match timestamps to when the symptom appeared.
 ### Step 6 — Diagnose and advise
 Based on collected data, apply the rules in **Common Failure Patterns** below.
 For code/launch fixes: provide the exact change. For config fixes: show the diff.
-Always re-run steps 3–5 after the user applies a fix to confirm resolution.
+Always re-run steps 1–5 (and Step 0 if you changed source) after the user
+applies a fix to confirm resolution.
 
 ---
 
@@ -260,6 +307,8 @@ Always re-run steps 3–5 after the user applies a fix to confirm resolution.
 | `missing_in_runtime` in `validate` | Publisher/sub not initialized | `rosout` for init errors | Check constructor, conditional init |
 | Echo shows stale timestamp | Publisher running but blocked | `rosout` for WARN | Check callback blocking, timer period |
 | Service call times out | Service not running | `services` list | Ensure service node is running |
+| Robot doesn't stop on Ctrl+C/crash | No shutdown zero-velocity publish | `lint-multirobot` check 8 | Add a shutdown hook that publishes zero Twist |
+| Works in sim, silent/wrong on real robots across machines | `ROS_DOMAIN_ID` mismatch | `lint-multirobot` check 9, or compare env on each machine | Set the same `ROS_DOMAIN_ID` everywhere |
 
 ---
 
@@ -278,10 +327,17 @@ When the user has a node with no manifest:
 
 1. **Forgetting to source ROS2**: Always check if `rclpy` is importable. If the
    script fails with `ModuleNotFoundError: No module named 'rclpy'`, the user
-   needs to `source /opt/ros/<distro>/setup.bash` first.
+   needs to `source /opt/ros/<distro>/setup.bash` first. This does NOT apply
+   to `lint-multirobot`/`lint-list-checks`, which work with plain Python 3.
 
 2. **Wrong namespace**: `/talker` and `talker` are different in ROS2. If
    `node-info` fails, try `--namespace /` explicitly or check `nodes` output.
 
 3. **Concluding without data**: Never say "looks fine" without having read actual
    messages from `echo`. The topic existing does not mean data is flowing.
+
+4. **Skipping the static scan when source is available**: `lint-multirobot`
+   is strictly cheaper than live debugging (no environment needed) and catches
+   a class of bug live introspection can't — a node that looks fine right now
+   but has no shutdown handler, for instance. Run it first, not as an
+   afterthought.

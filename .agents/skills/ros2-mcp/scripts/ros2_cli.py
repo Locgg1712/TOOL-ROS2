@@ -2,7 +2,9 @@
 """
 ros2_cli.py — Self-contained ROS2 introspection script for the ros2-mcp skill.
 ===============================================================================
-All subcommands write JSON (or YAML for generate-manifest) to --output file.
+All subcommands write JSON (or YAML for generate-manifest) to --output file,
+EXCEPT lint-multirobot, which prints to stdout/writes its own JSON via
+--output and needs no ROS2 environment at all (see that subcommand's help).
 
 Usage:
     python3 scripts/ros2_cli.py <subcommand> [args] --output <file>
@@ -20,10 +22,12 @@ Subcommands:
     get-manifest  <node>                Read a node's manifest YAML
     validate      <node>                Diff manifest vs live state
     generate-manifest <node>            Auto-generate manifest from live state
+    lint-multirobot <path>              Static multi-robot pitfall scan (NO ROS2 env needed)
 
 Requirements:
     - ROS2 environment must be sourced (rclpy, rosidl_runtime_py importable)
-    - PyYAML: pip install pyyaml
+      for every subcommand EXCEPT lint-multirobot.
+    - PyYAML: pip install pyyaml (only needed for manifest subcommands)
     - No other pip packages required
 """
 import argparse
@@ -33,6 +37,11 @@ import sys
 import threading
 import time
 from pathlib import Path
+
+# multirobot_lint.py sits alongside this script and has zero ROS/rclpy
+# dependencies — importing it never requires a sourced ROS2 environment.
+sys.path.insert(0, str(Path(__file__).parent))
+import multirobot_lint
 
 # ── Encoding fix for Windows consoles ────────────────────────────────────────
 if hasattr(sys.stdout, "reconfigure"):
@@ -420,6 +429,30 @@ def cmd_generate_manifest(args):
     print(f"  3. Run: python3 scripts/ros2_cli.py validate {node_name} --output /tmp/validate.json")
 
 
+def cmd_lint_multirobot(args):
+    """
+    Static multi-robot pitfall scan. Unlike every other subcommand in this
+    script, this needs NO sourced ROS2 environment and NO running graph — it
+    only reads source files from disk. Safe to run as the very first
+    diagnostic step, even before checking whether anything is running.
+    """
+    check_ids = [c.strip() for c in args.checks.split(",") if c.strip()] or None
+    report = multirobot_lint.run(Path(args.path), fix=args.fix, check_ids=check_ids)
+    if args.output:
+        _write(args.output, report)
+    else:
+        print(json.dumps(report, indent=2))
+    unresolved = [f for f in report["findings"] if f["severity"] in ("warning", "error") and not f["fixed"]]
+    if unresolved:
+        print(f"\n{len(unresolved)} unresolved finding(s) — see output above/--output for details.",
+              file=sys.stderr)
+
+
+def cmd_lint_list_checks(args):
+    for cid, desc in multirobot_lint.CHECK_DESCRIPTIONS.items():
+        print(f"{cid}: {desc}")
+
+
 # ── CLI parser ────────────────────────────────────────────────────────────────
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -496,6 +529,17 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--namespace", "-n", default="/")
     sp.add_argument("--output", required=True, help="Output YAML file path")
 
+    # lint-multirobot
+    sp = sub.add_parser("lint-multirobot",
+                         help="Static multi-robot pitfall scan — no ROS2 environment needed")
+    sp.add_argument("path", nargs="?", default=".", help="File or directory to scan (default: .)")
+    sp.add_argument("--fix", action="store_true", help="Apply conservative auto-fixes in place")
+    sp.add_argument("--checks", default="", help="Comma-separated check IDs to run (default: all)")
+    sp.add_argument("--output", default=None, help="Write JSON report here instead of stdout")
+
+    # lint-list-checks
+    sub.add_parser("lint-list-checks", help="List all multirobot-lint check IDs and descriptions")
+
     return p
 
 
@@ -512,6 +556,8 @@ _DISPATCH = {
     "get-manifest": cmd_get_manifest,
     "validate": cmd_validate,
     "generate-manifest": cmd_generate_manifest,
+    "lint-multirobot": cmd_lint_multirobot,
+    "lint-list-checks": cmd_lint_list_checks,
 }
 
 

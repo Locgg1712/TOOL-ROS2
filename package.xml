@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematron="http://download.ros.org/schema/package_format3.xsd"?>
+<package format="3">
+  <name>ros2_mcp_tools</name>
+  <version>0.1.0</version>
+  <description>
+    ROS2 graph introspection tools (MCP server + standalone CLI) for AI
+    assistants, plus multirobot_lint: a static analyzer for known ROS2
+    multi-robot pitfalls (sim-vs-real timeout assumptions, ignored anomaly
+    flags, unreferenced safety margins, missing shutdown zero-velocity
+    publish, etc). multirobot_lint requires no rclpy/sourced ROS2 environment
+    and is wired into `colcon test` via test/test_multirobot_lint_self.py.
+  </description>
+  <maintainer email="you@example.com">Loc</maintainer>
+  <license>MIT</license>
+
+  <depend>python3-yaml</depend>
+  <!-- rclpy/rosidl_runtime_py/mcp are only needed to run server.py/cli.py's
+       live-graph commands, not multirobot_lint itself; declared as exec_depend
+       so the linter half of this package stays usable without a full ROS2
+       install (e.g. in a plain CI runner). -->
+  <exec_depend>rclpy</exec_depend>
+
+  <test_depend>python3-pytest</test_depend>
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

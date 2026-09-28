@@ -9,8 +9,9 @@ DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 # Make files executable
 chmod +x "$DIR/cli.py"
 chmod +x "$DIR/server.py"
+chmod +x "$DIR/multirobot_lint.py"
 
-# Install Python dependencies (mcp[cli], pyyaml).
+# Install Python dependencies (mcp[cli], pyyaml, pytest).
 # rclpy itself comes from your sourced ROS2 environment, not pip.
 echo "Installing Python dependencies from requirements.txt ..."
 if command -v pip3 &>/dev/null; then
@@ -25,9 +26,13 @@ fi
 echo "Installing ros2mcp CLI to /usr/local/bin/ros2mcp..."
 sudo ln -sf "$DIR/cli.py" /usr/local/bin/ros2mcp
 
+echo "Installing ros2_multirobot_lint to /usr/local/bin/ros2_multirobot_lint..."
+sudo ln -sf "$DIR/multirobot_lint.py" /usr/local/bin/ros2_multirobot_lint
+
 if [ $? -eq 0 ]; then
-    echo "✓ Installation successful! You can now run 'ros2mcp' from any terminal."
+    echo "✓ Installation successful!"
     echo "  Try running: ros2mcp --help"
+    echo "  Or directly: ros2_multirobot_lint --list-checks   (no ROS2 env needed)"
 else
     echo "✗ Installation failed. Please ensure you have sudo privileges."
     exit 1

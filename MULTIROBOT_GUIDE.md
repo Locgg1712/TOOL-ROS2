@@ -97,6 +97,9 @@ mới cho việc quan sát cơ bản:
   dùng tên topic trần.
 - `validate_node(node_name, namespace="/robot2")` → so khớp manifest với từng robot
   riêng biệt (xem mục 6 để biết cách đặt tên manifest cho multi-robot).
+- `scan_multirobot_pitfalls(path)` → quét tĩnh code nguồn của cả fleet cùng lúc (xem
+  MULTIROBOT_LINT.md), không cần hệ thống đang chạy — dùng được ngay ở bước thiết kế,
+  trước khi có gì để `list_nodes` quan sát.
 
 ## 6. Mở rộng Manifest cho multi-robot
 
@@ -148,11 +151,14 @@ không thấy (áp dụng cho node dùng chung logic không phân biệt theo ro
    gốc hoặc `/fleet/...`, không đặt dưới namespace của riêng robot nào.
 5. **Viết/cập nhật manifest** cho từng robot theo mục 6.
 6. **Viết launch file** theo mẫu ở mục 4.
-7. **Kiểm chứng bằng tool, không suy diễn từ code**: chạy `list_nodes` xem đủ số robot
+7. **Quét tĩnh code trước khi chạy** bằng `scan_multirobot_pitfalls` (mục 5) — bắt
+   sớm các cạm bẫy kinh điển (thiếu prefix TF, ngưỡng an toàn không đối chiếu bán
+   kính, domain ID lệch giữa các file...) trước khi tốn công launch thử.
+8. **Kiểm chứng bằng tool, không suy diễn từ code**: chạy `list_nodes` xem đủ số robot
    × số node dự kiến chưa, dùng `get_node_info` với từng namespace xem topic có đúng
    private/shared như thiết kế không — đặc biệt kiểm tra không có topic nào bị "rò"
    ra ngoài namespace của nó.
-8. **Test cách ly hành vi**: publish lệnh (`publish_message`, sau khi đã xác nhận theo
+9. **Test cách ly hành vi**: publish lệnh (`publish_message`, sau khi đã xác nhận theo
    quy tắc an toàn) cho riêng `/robot1/cmd_vel`, dùng `echo_topic` trên
    `/robot2/odom` và `/robot3/odom` để xác nhận 2 robot còn lại **không** phản ứng —
    đây là bằng chứng thực sự cho "chạy độc lập", không phải chỉ vì code trông tách
@@ -166,6 +172,8 @@ không thấy (áp dụng cho node dùng chung logic không phân biệt theo ro
   đột, robot này "nhìn thấy mình" ở vị trí của robot khác.
 - Chạy nhiều robot sim trên cùng máy nhưng vô tình dùng chung `ROS_DOMAIN_ID` với một
   robot thật ở gần đó (ví dụ trong phòng lab) → nhiễu chéo giữa hệ thống test và hệ
-  thống thật, rất khó phát hiện nếu không chủ động kiểm tra `list_nodes` thấy node lạ.
+  thống thật, rất khó phát hiện nếu không chủ động kiểm tra `list_nodes` thấy node lạ
+  (hoặc chạy `scan_multirobot_pitfalls` để bắt lệch `ROS_DOMAIN_ID` giữa các file cấu
+  hình trước khi chạy thử).
 - Giả định các robot "giống hệt nhau" nên chỉ kiểm tra 1 robot rồi báo cáo chung cho
-  cả fleet — luôn lặp qua từng `robot_id` khi xác minh (xem mục 7, bước 7).
+  cả fleet — luôn lặp qua từng `robot_id` khi xác minh (xem mục 7, bước 8).

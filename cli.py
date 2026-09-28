@@ -16,10 +16,11 @@ Usage examples:
     python cli.py services
     python cli.py call /reset std_srvs/srv/Trigger
     python cli.py pub /cmd_vel geometry_msgs/msg/Twist '{"linear":{"x":0.2}}' --confirm
+    python cli.py lint-multirobot ./src --fix
 
 Requirements:
-    - ROS2 environment sourced (rclpy importable)
-    - No additional pip packages needed beyond rclpy
+    - ROS2 environment sourced (rclpy importable) for all commands EXCEPT
+      lint-multirobot, which is pure static analysis and needs no ROS2 setup.
 """
 import argparse
 import json
@@ -29,6 +30,8 @@ import threading
 import time
 from pathlib import Path
 from typing import Optional
+
+import multirobot_lint
 
 # Fix Windows console Unicode printing
 if hasattr(sys.stdout, 'reconfigure'):
@@ -479,6 +482,41 @@ def cmd_pub(args):
     print(_green("  ✓ Message published."))
 
 
+def cmd_lint_multirobot(args):
+    """Run the static multi-robot pitfall scanner (no ROS2 environment needed)."""
+    check_ids = [c.strip() for c in args.checks.split(",") if c.strip()] or None
+    report = multirobot_lint.run(Path(args.path), fix=args.fix, check_ids=check_ids)
+
+    if args.output:
+        Path(args.output).write_text(json.dumps(report, indent=2), encoding="utf-8")
+
+    if args.format == "json":
+        print(json.dumps(report, indent=2))
+        return
+
+    print(_bold(_cyan(f"  multirobot-lint: {report['files_scanned']} file(s) under {report['path']}")))
+    print(f"  findings: {len(report['findings'])}  "
+          f"{_green('fixed: ' + str(report['fixed_count']))}  "
+          f"{_yellow('pending: ' + str(report['todo_count']))}")
+    print()
+    for f in report["findings"]:
+        color = _red if f["severity"] == "error" else _yellow if f["severity"] == "warning" else _dim
+        tag = _green("[FIXED]") if f["fixed"] else _cyan("[FIX]") if f["fixable"] else _magenta("[MANUAL]")
+        print(f"  {f['file']}:{f['line']}: {color(f['severity'].upper())} check-{f['check_id']} {tag}")
+        print(f"    {_dim(f['message'])}")
+    if args.output:
+        print()
+        print(_dim(f"  JSON report written to {args.output}"))
+
+
+def cmd_lint_list_checks(args):
+    """List all multirobot-lint check IDs and descriptions."""
+    print(_bold(_cyan("  multirobot-lint checks")))
+    print()
+    for cid, desc in multirobot_lint.CHECK_DESCRIPTIONS.items():
+        print(f"    {_bold(cid)}: {desc}")
+
+
 # ── CLI entrypoint ───────────────────────────────────────────────────────────
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -503,6 +541,9 @@ examples:
   %(prog)s list-manifests                                     List available yaml manifests
   %(prog)s get-manifest talker                                Read a node manifest file
   %(prog)s validate-node talker                               Compare manifest with running state
+  %(prog)s lint-multirobot ./src                              Scan for multi-robot pitfalls
+  %(prog)s lint-multirobot ./src --fix                        Scan and auto-apply safe fixes
+  %(prog)s lint-list-checks                                   List all lint check IDs
         """,
     )
     sub = p.add_subparsers(dest="command", required=True, metavar="COMMAND")
@@ -563,6 +604,18 @@ examples:
     pu.add_argument("fields", help='JSON message fields, e.g. \'{"linear":{"x":0.2}}\'')
     pu.add_argument("--confirm", action="store_true", help="Required flag to actually publish")
 
+    # ── lint-multirobot ──
+    lm = sub.add_parser("lint-multirobot",
+                         help="Static scan for ROS2 multi-robot pitfalls (no ROS2 env needed)")
+    lm.add_argument("path", nargs="?", default=".", help="File or directory to scan (default: .)")
+    lm.add_argument("--fix", action="store_true", help="Apply conservative auto-fixes in place")
+    lm.add_argument("--checks", default="", help="Comma-separated check IDs to run (default: all)")
+    lm.add_argument("--output", default=None, help="Also write the full JSON report to this file")
+    lm.add_argument("--format", choices=["text", "json"], default="text", help="Console output format")
+
+    # ── lint-list-checks ──
+    sub.add_parser("lint-list-checks", help="List all multirobot-lint check IDs and descriptions")
+
     return p
 
 
@@ -579,7 +632,12 @@ _DISPATCH = {
     "list-manifests": cmd_list_manifests,
     "get-manifest": cmd_get_manifest,
     "validate-node": cmd_validate_node,
+    "lint-multirobot": cmd_lint_multirobot,
+    "lint-list-checks": cmd_lint_list_checks,
 }
+
+# Commands that are pure static analysis and must NOT try to bring up rclpy.
+_NO_ROS_REQUIRED = {"lint-multirobot", "lint-list-checks"}
 
 
 def main():
@@ -597,13 +655,15 @@ def main():
         sys.exit(1)
     finally:
         print()  # trailing newline for clean output
-        # Cleanly shut down rclpy to avoid DDS warnings in stderr.
-        try:
-            import rclpy
-            if rclpy.ok():
-                rclpy.shutdown()
-        except Exception:
-            pass
+        # Cleanly shut down rclpy to avoid DDS warnings in stderr. Skip this
+        # for commands that never touch rclpy in the first place.
+        if args.command not in _NO_ROS_REQUIRED:
+            try:
+                import rclpy
+                if rclpy.ok():
+                    rclpy.shutdown()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

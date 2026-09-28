@@ -46,6 +46,8 @@ from rosidl_runtime_py import message_to_ordereddict, set_message_fields
 
 from mcp.server.fastmcp import FastMCP
 
+import multirobot_lint
+
 mcp = FastMCP("ros2-mcp")
 
 _ALLOW_PUBLISH = os.environ.get("ROS2_MCP_ALLOW_PUBLISH", "0") == "1"
@@ -396,5 +398,41 @@ def publish_message(topic: str, msg_type: str, fields: str, confirm: bool = Fals
     return json.dumps({"status": "published", "topic": topic, "msg_type": msg_type})
 
 
-if __name__ == "__main__":
+# ---------------------------------------------------------------------------
+# Static code analysis — multi-robot pitfall scanner (no rclpy required).
+# See MULTIROBOT_LINT.md for the full check list and rationale.
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def scan_multirobot_pitfalls(path: str = ".", fix: bool = False, checks: str = "") -> str:
+    """
+    Statically scan Python/launch/YAML source files under `path` for known
+    ROS2 multi-robot pitfalls (sim-vs-real timeout assumptions, ignored
+    anomaly flags, unreferenced safety margins, missing shutdown zero-velocity
+    publish, etc — see MULTIROBOT_LINT.md for the full list of ~10 checks).
+
+    This is pure static analysis: it does NOT require a sourced ROS2
+    environment or a running graph, unlike every other tool in this server.
+
+    Set fix=true to have it apply the conservative, mechanically-safe fixes
+    (inserted TODO comments / docstring disclaimers / safety assertions) it
+    is confident about; findings that need a human decision (real hardware
+    limits, real robot radius, etc.) are reported but never auto-edited.
+
+    checks: optional comma-separated list of check IDs (e.g. "1,3,8") to run
+    only a subset. Empty runs all checks.
+    """
+    check_ids = [c.strip() for c in checks.split(",") if c.strip()] or None
+    try:
+        report = multirobot_lint.run(Path(path), fix=fix, check_ids=check_ids)
+    except Exception as e:
+        return json.dumps({"error": f"Lint scan failed: {e}"})
+    return json.dumps(report, indent=2, default=str)
+
+
+def main():
     mcp.run(transport="stdio")
+
+
+if __name__ == "__main__":
+    main()

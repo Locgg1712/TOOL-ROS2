@@ -2,34 +2,29 @@
 """
 ROS2 MCP Server
 ================
-Exposes a running ROS2 graph (nodes, topics, services) to Claude via the
-Model Context Protocol, so Claude can diagnose and interact with a real
-ROS2 system instead of just reasoning about it in the abstract.
+Exposes a running ROS2 graph (nodes, topics, services) to Claude via MCP, so
+Claude can diagnose a real ROS2 system instead of reasoning in the abstract.
 
 REQUIREMENTS
 ------------
-- A sourced ROS2 environment (rclpy must be importable). This is NOT a
-  pip-installable package by itself; you need ROS2 (Humble/Iron/Jazzy/...)
-  installed and `source /opt/ros/<distro>/setup.bash` run first.
-- `pip install mcp` (in an environment that also has access to rclpy, e.g.
-  a venv created with --system-site-packages, or just the system Python
-  ROS2 already uses).
+- Live-graph tools need a sourced ROS2 environment (rclpy importable).
+- `scan_multirobot_pitfalls`, `list_manifests` and `get_manifest` do NOT:
+  this server now starts even when rclpy is missing; the live-graph tools
+  then return a clear JSON error instead of crashing the whole server.
+- `pip install mcp pyyaml`
 
 RUN
 ---
-    source /opt/ros/<distro>/setup.bash
+    source /opt/ros/<distro>/setup.bash     # optional for static tools
     python3 server.py
-
-Then point Claude Desktop / Claude Code / the API at this script over
-stdio (see README.md for config examples).
 
 SAFETY
 ------
-All tools are read-only / diagnostic EXCEPT `publish_message`, which can
-send a real command onto the ROS2 graph (e.g. move a robot). That tool is
-disabled unless you explicitly set the environment variable
-ROS2_MCP_ALLOW_PUBLISH=1 AND pass confirm=true on every call.
+All tools are read-only EXCEPT `publish_message` (disabled unless
+ROS2_MCP_ALLOW_PUBLISH=1 AND confirm=true on every call). Optionally cap Twist
+commands with ROS2_MCP_MAX_LINEAR / ROS2_MCP_MAX_ANGULAR.
 """
+import functools
 import json
 import os
 import threading
@@ -37,47 +32,54 @@ import time
 from pathlib import Path
 from typing import Optional
 
-import yaml
-import rclpy
-from rclpy.executors import SingleThreadedExecutor
-from rclpy.qos import QoSProfile
-from rosidl_runtime_py.utilities import get_message, get_service
-from rosidl_runtime_py import message_to_ordereddict, set_message_fields
-
-from mcp.server.fastmcp import FastMCP
+try:                                    # mcp 1.x
+    from mcp.server.fastmcp import FastMCP
+except ImportError:                     # mcp 2.x renamed FastMCP -> MCPServer
+    from mcp.server.mcpserver import MCPServer as FastMCP
 
 import multirobot_lint
+from ros2_infra import split_infra
+
+try:  # rclpy only exists inside a sourced ROS2 environment
+    import rclpy
+    from rclpy.executors import SingleThreadedExecutor
+    from rclpy.qos import (QoSProfile, ReliabilityPolicy, DurabilityPolicy)
+    from rosidl_runtime_py.utilities import get_message, get_service
+    from rosidl_runtime_py import message_to_ordereddict, set_message_fields
+    _ROS_IMPORT_ERROR = None
+except ImportError as _e:  # pragma: no cover - depends on environment
+    rclpy = None
+    _ROS_IMPORT_ERROR = str(_e)
 
 mcp = FastMCP("ros2-mcp")
 
 _ALLOW_PUBLISH = os.environ.get("ROS2_MCP_ALLOW_PUBLISH", "0") == "1"
 
-# Directory holding one YAML manifest per node (design intent). See
-# MANIFEST_SCHEMA.md for the format and naming convention.
-# Resolve manifest directory relative to this file's location (not the process
-# CWD, which may differ when spawned by Claude Desktop / Code from home dir).
+# Resolve relative to this file (CWD is unreliable when spawned by a desktop client).
 _MANIFEST_DIR = Path(
-    os.environ.get("ROS2_MCP_MANIFEST_DIR",
-                   str(Path(__file__).parent / "ros2_manifests"))
+    os.environ.get("ROS2_MCP_MANIFEST_DIR", str(Path(__file__).parent / "ros2_manifests"))
 ).resolve()
 
-# ROS2 node names must be unique on the graph. If multiple AI clients (Claude,
-# Codex, Antigravity, ...) each launch their own copy of this server as a
-# separate stdio subprocess, they'd otherwise collide on the same fixed name.
-# Default to a per-process unique name; override explicitly if you want a
-# stable, predictable name instead (e.g. for a single always-on client).
+# Per-process unique node name so several MCP clients do not collide on the graph.
 _NODE_NAME = os.environ.get("ROS2_MCP_NODE_NAME", f"ai_mcp_bridge_{os.getpid()}")
 
 _node = None
-_executor: Optional[SingleThreadedExecutor] = None
+_executor = None
 _spin_thread: Optional[threading.Thread] = None
 _lock = threading.Lock()
 
 
+class _RosUnavailable(RuntimeError):
+    pass
+
+
 def _ensure_node():
-    """Lazily bring up a single background rclpy node + executor, shared
-    across all tool calls for the lifetime of this server process."""
     global _node, _executor, _spin_thread
+    if rclpy is None:
+        raise _RosUnavailable(
+            f"rclpy is not importable ({_ROS_IMPORT_ERROR}). Source your ROS2 environment "
+            "(source /opt/ros/<distro>/setup.bash) and restart this server. "
+            "Static tools (scan_multirobot_pitfalls, list_manifests, get_manifest) still work.")
     with _lock:
         if _node is not None:
             return
@@ -85,19 +87,44 @@ def _ensure_node():
         _node = rclpy.create_node(_NODE_NAME)
         _executor = SingleThreadedExecutor()
         _executor.add_node(_node)
-
-        def _spin():
-            _executor.spin()
-
-        _spin_thread = threading.Thread(target=_spin, daemon=True)
+        _spin_thread = threading.Thread(target=_executor.spin, daemon=True)
         _spin_thread.start()
-        # Give discovery a moment to populate the ROS graph.
-        time.sleep(1.0)
+        time.sleep(1.0)  # let discovery populate the graph
 
 
-def _msg_to_dict(msg) -> dict:
-    """Best-effort conversion of a ROS2 message to a JSON-serializable dict."""
-    return json.loads(json.dumps(message_to_ordereddict(msg), default=str))
+def ros_required(fn):
+    """Turn a missing rclpy into a JSON error instead of an exception."""
+    @functools.wraps(fn)
+    def wrapper(*a, **kw):
+        try:
+            return fn(*a, **kw)
+        except _RosUnavailable as e:
+            return json.dumps({"error": str(e)})
+    return wrapper
+
+
+def _full_name(ns: str, name: str) -> str:
+    ns = ns or "/"
+    return f"/{name}" if ns == "/" else f"{ns.rstrip('/')}/{name}"
+
+
+def _truncate(obj, max_len: int):
+    """Shorten big arrays/strings (LaserScan.ranges, Image.data, ...) so one
+    echo cannot flood the model context."""
+    if isinstance(obj, list):
+        if len(obj) > max_len:
+            return [_truncate(x, max_len) for x in obj[:max_len]] + [f"...<{len(obj) - max_len} more items truncated>"]
+        return [_truncate(x, max_len) for x in obj]
+    if isinstance(obj, dict):
+        return {k: _truncate(v, max_len) for k, v in obj.items()}
+    if isinstance(obj, str) and len(obj) > 2000:
+        return obj[:2000] + f"...<{len(obj) - 2000} chars truncated>"
+    return obj
+
+
+def _msg_to_dict(msg, max_array_len: int = 32) -> dict:
+    d = json.loads(json.dumps(message_to_ordereddict(msg), default=str))
+    return _truncate(d, max_array_len) if max_array_len > 0 else d
 
 
 # ---------------------------------------------------------------------------
@@ -105,17 +132,20 @@ def _msg_to_dict(msg) -> dict:
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
+@ros_required
 def list_nodes() -> str:
-    """List all currently running ROS2 node names and namespaces."""
+    """List all currently running ROS2 nodes (name, namespace, full path)."""
     _ensure_node()
     try:
         names = _node.get_node_names_and_namespaces()
     except Exception as e:
         return json.dumps({"error": f"Failed to list nodes: {e}"})
-    return json.dumps([{"name": n, "namespace": ns} for n, ns in names], indent=2)
+    return json.dumps([{"name": n, "namespace": ns, "full": _full_name(ns, n)}
+                       for n, ns in sorted(names, key=lambda x: (x[1], x[0]))], indent=2)
 
 
 @mcp.tool()
+@ros_required
 def list_topics() -> str:
     """List all active ROS2 topics with their message types."""
     _ensure_node()
@@ -123,12 +153,23 @@ def list_topics() -> str:
         topics = _node.get_topic_names_and_types()
     except Exception as e:
         return json.dumps({"error": f"Failed to list topics: {e}"})
-    return json.dumps([{"topic": t, "types": ty} for t, ty in topics], indent=2)
+    return json.dumps([{"topic": t, "types": ty} for t, ty in sorted(topics)], indent=2)
+
+
+def _qos_summary(info) -> dict:
+    try:
+        q = info.qos_profile
+        return {"reliability": q.reliability.name, "durability": q.durability.name}
+    except Exception:
+        return {}
 
 
 @mcp.tool()
+@ros_required
 def get_topic_info(topic: str) -> str:
-    """Get publisher/subscriber counts and node names for a specific topic."""
+    """Publisher/subscriber counts for a topic. Nodes are reported with their FULL
+    name (namespace included) so robots that share a node name stay distinguishable,
+    plus each endpoint's QoS (reliability/durability) when available."""
     _ensure_node()
     try:
         pubs = _node.get_publishers_info_by_topic(topic)
@@ -139,12 +180,13 @@ def get_topic_info(topic: str) -> str:
         "topic": topic,
         "publisher_count": len(pubs),
         "subscriber_count": len(subs),
-        "publisher_nodes": [p.node_name for p in pubs],
-        "subscriber_nodes": [s.node_name for s in subs],
+        "publisher_nodes": [{"node": _full_name(p.node_namespace, p.node_name), **_qos_summary(p)} for p in pubs],
+        "subscriber_nodes": [{"node": _full_name(s.node_namespace, s.node_name), **_qos_summary(s)} for s in subs],
     }, indent=2)
 
 
 @mcp.tool()
+@ros_required
 def list_services() -> str:
     """List all active ROS2 services with their types."""
     _ensure_node()
@@ -152,25 +194,23 @@ def list_services() -> str:
         services = _node.get_service_names_and_types()
     except Exception as e:
         return json.dumps({"error": f"Failed to list services: {e}"})
-    return json.dumps([{"service": s, "types": ty} for s, ty in services], indent=2)
+    return json.dumps([{"service": s, "types": ty} for s, ty in sorted(services)], indent=2)
 
 
 @mcp.tool()
+@ros_required
 def get_node_info(node_name: str, namespace: str = "/") -> str:
-    """Get the publishers, subscribers, and services exposed by a specific node.
-    node_name should be given without leading slash, e.g. 'talker'.
-    If the node is not found, returns an error with a hint to check list_nodes."""
+    """Publishers, subscribers and services of one node. node_name without leading
+    slash (e.g. 'talker'); pass namespace='/robot1' for namespaced robots."""
     _ensure_node()
-    full = f"{namespace.rstrip('/')}/{node_name}" if namespace != "/" else f"/{node_name}"
+    full = _full_name(namespace, node_name)
     try:
         pubs = _node.get_publisher_names_and_types_by_node(node_name, namespace)
         subs = _node.get_subscriber_names_and_types_by_node(node_name, namespace)
         srvs = _node.get_service_names_and_types_by_node(node_name, namespace)
     except Exception as e:
-        return json.dumps({
-            "error": f"Could not get info for node '{full}': {e}",
-            "hint": "Use list_nodes to verify the node name and namespace.",
-        })
+        return json.dumps({"error": f"Could not get info for node '{full}': {e}",
+                           "hint": "Use list_nodes to verify the node name and namespace."})
     return json.dumps({
         "node": full,
         "publishers": [{"topic": t, "types": ty} for t, ty in pubs],
@@ -180,24 +220,33 @@ def get_node_info(node_name: str, namespace: str = "/") -> str:
 
 
 # ---------------------------------------------------------------------------
-# Node manifests — declared design intent, vs. get_node_info's live truth.
-# See MANIFEST_SCHEMA.md for the file format and naming convention.
+# Node manifests
 # ---------------------------------------------------------------------------
 
-def _load_manifest(node_name: str) -> dict:
-    path = _MANIFEST_DIR / f"{node_name}.yaml"
-    if not path.exists():
-        raise FileNotFoundError(f"No manifest found for node '{node_name}' at {path}")
-    with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+def _manifest_candidates(node_name: str, namespace: str = "/"):
+    """Multi-robot lookup order: <robot>_<node>.yaml (namespace '/robot1' ->
+    'robot1'), then plain <node>.yaml for logic shared by every robot."""
+    prefix = (namespace or "/").strip("/").replace("/", "_")
+    names = [f"{prefix}_{node_name}.yaml"] if prefix else []
+    names.append(f"{node_name}.yaml")
+    return [_MANIFEST_DIR / n for n in names]
+
+
+def _load_manifest(node_name: str, namespace: str = "/") -> dict:
+    import yaml  # lazy: only manifest tools need PyYAML
+    cands = _manifest_candidates(node_name, namespace)
+    for path in cands:
+        if path.exists():
+            with open(path, "r", encoding="utf-8") as f:
+                return yaml.safe_load(f) or {}
+    raise FileNotFoundError(
+        f"No manifest found for node '{node_name}' (tried: {', '.join(str(c) for c in cands)})")
 
 
 @mcp.tool()
 def list_manifests() -> str:
-    """List all node manifest files available (design-intent docs written by
-    the team). Directory is set via ROS2_MCP_MANIFEST_DIR (default
-    './ros2_manifests'). Use this to discover which nodes have documented
-    structure before diving into live inspection."""
+    """List available node manifest files (design-intent docs). Directory from
+    ROS2_MCP_MANIFEST_DIR (default: ./ros2_manifests next to this file)."""
     if not _MANIFEST_DIR.exists():
         return json.dumps({"error": f"Manifest directory not found: {_MANIFEST_DIR}"})
     files = sorted(p.stem for p in _MANIFEST_DIR.glob("*.yaml"))
@@ -205,30 +254,25 @@ def list_manifests() -> str:
 
 
 @mcp.tool()
-def get_manifest(node_name: str) -> str:
-    """Read the DECLARED structure of a node from its manifest file: purpose,
-    topics it publishes/subscribes, services, parameters. This is design
-    intent written by humans, NOT live state — cross-check with
-    `get_node_info` (live) via `validate_node` to catch drift."""
+def get_manifest(node_name: str, namespace: str = "/") -> str:
+    """Read the DECLARED structure of a node from its manifest (design intent, not
+    live state). For namespaced robots pass namespace, e.g. '/robot1' looks for
+    robot1_<node>.yaml first, then <node>.yaml."""
     try:
-        data = _load_manifest(node_name)
+        return json.dumps(_load_manifest(node_name, namespace), indent=2)
     except FileNotFoundError as e:
         return json.dumps({"error": str(e)})
-    return json.dumps(data, indent=2)
 
 
 @mcp.tool()
+@ros_required
 def validate_node(node_name: str, namespace: str = "/") -> str:
-    """
-    Compare a node's manifest (what it's SUPPOSED to do) against its actual
-    live ROS2 graph state (what it's ACTUALLY doing right now), and report
-    mismatches: topics/services declared in the manifest but missing at
-    runtime, and topics/services found at runtime but not documented in the
-    manifest. This is the fastest way to catch drift between design and
-    reality — use it as a first diagnostic step before deep debugging.
-    """
+    """Compare a node's manifest (SUPPOSED) with its live graph state (ACTUAL):
+    `missing_in_runtime` = declared but not running; `undeclared_in_manifest` =
+    running but not documented. Standard infrastructure (/rosout,
+    /parameter_events, parameter services) is ignored and listed separately."""
     try:
-        manifest = _load_manifest(node_name)
+        manifest = _load_manifest(node_name, namespace)
     except FileNotFoundError as e:
         return json.dumps({"error": str(e)})
 
@@ -238,39 +282,69 @@ def validate_node(node_name: str, namespace: str = "/") -> str:
         live_subs = {t for t, _ in _node.get_subscriber_names_and_types_by_node(node_name, namespace)}
         live_srvs = {s for s, _ in _node.get_service_names_and_types_by_node(node_name, namespace)}
     except Exception as e:
-        return json.dumps({
-            "error": f"Could not read live state for node '{node_name}': {e}",
-            "hint": "Use list_nodes to verify the node name and namespace.",
-        })
+        return json.dumps({"error": f"Could not read live state for node '{node_name}': {e}",
+                           "hint": "Use list_nodes to verify the node name and namespace."})
 
-    # Guard against malformed manifest entries that are missing the key field.
+    live_pubs, live_srvs, ign1 = split_infra(live_pubs, live_srvs)
+    live_subs, _, ign2 = split_infra(live_subs, ())
+
     declared_pubs = {p["topic"] for p in manifest.get("publishes", []) if "topic" in p}
     declared_subs = {s["topic"] for s in manifest.get("subscribes", []) if "topic" in s}
     declared_srvs = {s["service"] for s in manifest.get("services_provided", []) if "service" in s}
 
     def _diff(declared, live):
-        return {
-            "missing_in_runtime": sorted(declared - live),
-            "undeclared_in_manifest": sorted(live - declared),
-        }
+        return {"missing_in_runtime": sorted(declared - live),
+                "undeclared_in_manifest": sorted(live - declared),
+                "matched": sorted(declared & live)}
 
-    return json.dumps({
-        "node": node_name,
+    result = {
+        "node": _full_name(namespace, node_name),
         "publishes": _diff(declared_pubs, live_pubs),
         "subscribes": _diff(declared_subs, live_subs),
         "services": _diff(declared_srvs, live_srvs),
-    }, indent=2)
+        "ignored_infrastructure": sorted(set(ign1) | set(ign2)),
+    }
+    issues = sum(len(result[k][d]) for k in ("publishes", "subscribes", "services")
+                 for d in ("missing_in_runtime", "undeclared_in_manifest"))
+    result["verdict"] = "OK" if not issues else f"{issues} discrepancie(s) found"
+    return json.dumps(result, indent=2)
+
+
+def _auto_qos(topic: str, mode: str):
+    """QoS the subscriber should use. 'auto' mirrors what the publishers offer so
+    Best-Effort sensor topics and Transient-Local topics (/rosout, /map) work."""
+    if mode == "reliable":
+        return QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE), "reliable"
+    if mode == "best_effort":
+        return QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT), "best_effort"
+    try:
+        pubs = _node.get_publishers_info_by_topic(topic)
+        if pubs:
+            best_effort = any(p.qos_profile.reliability == ReliabilityPolicy.BEST_EFFORT for p in pubs)
+            latched = all(p.qos_profile.durability == DurabilityPolicy.TRANSIENT_LOCAL for p in pubs)
+            q = QoSProfile(
+                depth=10,
+                reliability=ReliabilityPolicy.BEST_EFFORT if best_effort else ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL if latched else DurabilityPolicy.VOLATILE,
+            )
+            return q, f"auto({'best_effort' if best_effort else 'reliable'}/{'transient_local' if latched else 'volatile'})"
+    except Exception:
+        pass
+    return QoSProfile(depth=10), "default(reliable/volatile; publisher QoS unavailable)"
 
 
 @mcp.tool()
-def echo_topic(topic: str, msg_type: str, count: int = 3, timeout_sec: float = 5.0) -> str:
+@ros_required
+def echo_topic(topic: str, msg_type: str, count: int = 3, timeout_sec: float = 5.0,
+               qos: str = "auto", max_array_len: int = 32) -> str:
     """
-    Subscribe to a topic temporarily and capture up to `count` messages within
-    `timeout_sec` seconds, then unsubscribe. Use this to inspect real, live
-    data flowing on a topic (equivalent to `ros2 topic echo`).
+    Capture up to `count` messages within `timeout_sec` (like `ros2 topic echo`).
 
-    msg_type must be the full type string, e.g. 'geometry_msgs/msg/Twist' or
-    'sensor_msgs/msg/LaserScan'. Use `list_topics` first if you don't know it.
+    msg_type: full type, e.g. 'geometry_msgs/msg/Twist'. Use list_topics if unknown.
+    qos: 'auto' (default; mirrors the publishers' reliability/durability),
+         'reliable' or 'best_effort' to force one.
+    max_array_len: arrays/strings longer than this are truncated so LaserScan/Image
+         messages don't flood the context (0 disables truncation).
     """
     _ensure_node()
     try:
@@ -278,54 +352,45 @@ def echo_topic(topic: str, msg_type: str, count: int = 3, timeout_sec: float = 5
     except Exception as e:
         return json.dumps({"error": f"Unknown message type '{msg_type}': {e}"})
 
+    qos_profile, qos_used = _auto_qos(topic, qos)
     captured = []
     done = threading.Event()
 
     def _cb(msg):
-        captured.append(_msg_to_dict(msg))
+        captured.append(_msg_to_dict(msg, max_array_len))
         if len(captured) >= count:
             done.set()
 
-    sub = _node.create_subscription(msg_class, topic, _cb, QoSProfile(depth=10))
+    sub = _node.create_subscription(msg_class, topic, _cb, qos_profile)
     done.wait(timeout=timeout_sec)
     _node.destroy_subscription(sub)
 
     timed_out = len(captured) < count
-    result: dict = {
-        "topic": topic,
-        "captured_count": len(captured),
-        "messages": captured,
-        "timed_out": timed_out,
-    }
+    result: dict = {"topic": topic, "qos_used": qos_used, "captured_count": len(captured),
+                    "messages": captured, "timed_out": timed_out}
     if timed_out:
         result["hint"] = (
-            f"Received {len(captured)}/{count} messages in {timeout_sec}s. "
-            "If captured_count is 0 and a publisher exists (check get_topic_info), "
-            "the most likely cause is a QoS mismatch: this subscriber uses "
-            "Reliable/Volatile QoS, but many sensor topics (LaserScan, Image, "
-            "PointCloud2, etc.) publish with Best-Effort QoS. "
-            "Do NOT conclude the node is not publishing based on this result alone."
-        )
+            f"Received {len(captured)}/{count} messages in {timeout_sec}s (QoS used: {qos_used}). "
+            "If 0 and a publisher exists (see get_topic_info), try qos='best_effort' or "
+            "'reliable' explicitly, and check the topic name/namespace and ROS_DOMAIN_ID. "
+            "Do NOT conclude the node is silent from this result alone.")
     return json.dumps(result, indent=2)
 
 
 @mcp.tool()
+@ros_required
 def tail_rosout(count: int = 20, timeout_sec: float = 5.0) -> str:
     """Capture recent aggregated log messages from /rosout across all nodes."""
     return echo_topic("/rosout", "rcl_interfaces/msg/Log", count=count, timeout_sec=timeout_sec)
 
 
 @mcp.tool()
+@ros_required
 def call_service(service: str, srv_type: str, request_fields: str = "{}", timeout_sec: float = 5.0) -> str:
     """
-    Call a ROS2 service and return the response. This can have real effects
-    if the service triggers an action (e.g. resetting a simulation), so use
-    with the same care as `ros2 service call`.
-
-    srv_type must be the full type string, e.g. 'std_srvs/srv/Trigger' or
-    'example_interfaces/srv/AddTwoInts'.
-    request_fields is a JSON object string mapping field names to values,
-    e.g. '{"a": 3, "b": 5}'. Leave as '{}' for services with no request fields.
+    Call a ROS2 service. Can have real effects (e.g. resetting a simulation) — use
+    like `ros2 service call`. srv_type: full type ('std_srvs/srv/Trigger').
+    request_fields: JSON object string, e.g. '{"a": 3, "b": 5}'.
     """
     _ensure_node()
     try:
@@ -357,20 +422,38 @@ def call_service(service: str, srv_type: str, request_fields: str = "{}", timeou
 
 
 # ---------------------------------------------------------------------------
-# Actuation tool — disabled by default (see module docstring)
+# Actuation tool — disabled by default
 # ---------------------------------------------------------------------------
 
+def _twist_limit_error(msg) -> Optional[str]:
+    """Optional safety cap: set ROS2_MCP_MAX_LINEAR (m/s) and/or ROS2_MCP_MAX_ANGULAR
+    (rad/s) and any Twist/TwistStamped above them is refused. Unset = no cap."""
+    try:
+        max_lin = float(os.environ["ROS2_MCP_MAX_LINEAR"]) if os.environ.get("ROS2_MCP_MAX_LINEAR") else None
+        max_ang = float(os.environ["ROS2_MCP_MAX_ANGULAR"]) if os.environ.get("ROS2_MCP_MAX_ANGULAR") else None
+    except ValueError:
+        return "ROS2_MCP_MAX_LINEAR / ROS2_MCP_MAX_ANGULAR must be numbers."
+    if max_lin is None and max_ang is None:
+        return None
+    twist = getattr(msg, "twist", msg)           # TwistStamped wraps .twist
+    if not (hasattr(twist, "linear") and hasattr(twist, "angular")):
+        return None
+    lin = max(abs(twist.linear.x), abs(twist.linear.y), abs(twist.linear.z))
+    ang = max(abs(twist.angular.x), abs(twist.angular.y), abs(twist.angular.z))
+    if max_lin is not None and lin > max_lin:
+        return f"Refused: |linear| = {lin} exceeds ROS2_MCP_MAX_LINEAR = {max_lin}."
+    if max_ang is not None and ang > max_ang:
+        return f"Refused: |angular| = {ang} exceeds ROS2_MCP_MAX_ANGULAR = {max_ang}."
+    return None
+
+
 @mcp.tool()
+@ros_required
 def publish_message(topic: str, msg_type: str, fields: str, confirm: bool = False) -> str:
     """
-    Publish a single message to a topic. THIS CAN COMMAND REAL HARDWARE
-    (e.g. move a robot via /cmd_vel). Disabled by default.
-
-    To enable: start this server with the environment variable
-    ROS2_MCP_ALLOW_PUBLISH=1, AND pass confirm=true on every call.
-
-    fields is a JSON object string matching the message structure, e.g. for
-    geometry_msgs/msg/Twist: '{"linear": {"x": 0.2}, "angular": {"z": 0.0}}'.
+    Publish ONE message. THIS CAN COMMAND REAL HARDWARE (e.g. /cmd_vel). Disabled by
+    default: start the server with ROS2_MCP_ALLOW_PUBLISH=1 AND pass confirm=true.
+    fields: JSON object, e.g. '{"linear": {"x": 0.2}, "angular": {"z": 0.0}}'.
     """
     if not _ALLOW_PUBLISH:
         return json.dumps({"error": "Publishing is disabled on this server. "
@@ -378,7 +461,6 @@ def publish_message(topic: str, msg_type: str, fields: str, confirm: bool = Fals
     if not confirm:
         return json.dumps({"error": "Set confirm=true to actually publish. "
                                      "This will send a real message onto the ROS2 graph."})
-
     _ensure_node()
     try:
         msg_class = get_message(msg_type)
@@ -391,40 +473,38 @@ def publish_message(topic: str, msg_type: str, fields: str, confirm: bool = Fals
     except Exception as e:
         return json.dumps({"error": f"Failed to set message fields: {e}"})
 
+    limit_err = _twist_limit_error(msg)
+    if limit_err:
+        return json.dumps({"error": limit_err})
+
     pub = _node.create_publisher(msg_class, topic, 10)
-    time.sleep(0.2)  # let discovery connect subscribers before publishing
+    time.sleep(0.2)  # let discovery connect subscribers
     pub.publish(msg)
     _node.destroy_publisher(pub)
     return json.dumps({"status": "published", "topic": topic, "msg_type": msg_type})
 
 
 # ---------------------------------------------------------------------------
-# Static code analysis — multi-robot pitfall scanner (no rclpy required).
-# See MULTIROBOT_LINT.md for the full check list and rationale.
+# Static analysis — needs NO rclpy
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def scan_multirobot_pitfalls(path: str = ".", fix: bool = False, checks: str = "") -> str:
+def scan_multirobot_pitfalls(path: str = ".", fix: bool = False, checks: str = "",
+                             exclude: str = "") -> str:
     """
-    Statically scan Python/launch/YAML source files under `path` for known
-    ROS2 multi-robot pitfalls (sim-vs-real timeout assumptions, ignored
-    anomaly flags, unreferenced safety margins, missing shutdown zero-velocity
-    publish, etc — see MULTIROBOT_LINT.md for the full list of ~10 checks).
+    Statically scan Python/C++/launch/YAML/shell sources under `path` for known ROS2
+    multi-robot pitfalls (see MULTIROBOT_LINT.md). Needs NO sourced ROS2 environment.
 
-    This is pure static analysis: it does NOT require a sourced ROS2
-    environment or a running graph, unlike every other tool in this server.
-
-    Set fix=true to have it apply the conservative, mechanically-safe fixes
-    (inserted TODO comments / docstring disclaimers / safety assertions) it
-    is confident about; findings that need a human decision (real hardware
-    limits, real robot radius, etc.) are reported but never auto-edited.
-
-    checks: optional comma-separated list of check IDs (e.g. "1,3,8") to run
-    only a subset. Empty runs all checks.
+    fix=true applies only mechanically-safe edits (TODO comments / docstring
+    disclaimers); each edited .py file is re-compiled first and encoding/line endings
+    are preserved. checks: e.g. "1,3,8" (empty = all). exclude: comma-separated globs
+    (e.g. "tests/fixtures/*,third_party/*"). Suppress a finding in code with
+    '# LINT-IGNORE[multirobot:N] reason' or a whole file with '# LINT-DISABLE[multirobot:N]'.
     """
     check_ids = [c.strip() for c in checks.split(",") if c.strip()] or None
+    excludes = [e.strip() for e in exclude.split(",") if e.strip()]
     try:
-        report = multirobot_lint.run(Path(path), fix=fix, check_ids=check_ids)
+        report = multirobot_lint.run(Path(path), fix=fix, check_ids=check_ids, exclude=excludes)
     except Exception as e:
         return json.dumps({"error": f"Lint scan failed: {e}"})
     return json.dumps(report, indent=2, default=str)

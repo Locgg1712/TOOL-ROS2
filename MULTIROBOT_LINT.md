@@ -1,93 +1,94 @@
 # multirobot_lint — Quét tĩnh cạm bẫy ROS2 đa robot
 
-`multirobot_lint.py` là bộ quét tĩnh (AST + regex trên Python/YAML/shell), **không cần
-môi trường ROS2 đã source, không cần rclpy, không cần hệ thống đang chạy**. Đây là điểm
-khác biệt lớn nhất so với mọi tool khác trong bộ `ros2-mcp` — có thể chạy ngay cả khi
-chưa cài ROS2, trong CI, hoặc trong `colcon test`.
+`multirobot_lint.py` là bộ quét tĩnh (AST + regex trên Python/C++/YAML/shell), **không cần
+ROS2 đã source, không cần rclpy, không cần hệ thống đang chạy**. Chạy được trong CI, pre-commit
+hoặc `colcon test`. Chỉ cần Python 3 (thư viện chuẩn).
 
-Công cụ này mã hoá lại các cạm bẫy đã quan sát được khi hệ thống multi-robot (điều
-khiển đội hình kiểu CVT/Voronoi, kiến trúc tập trung/phân tán, AMCL đa robot...)
-chuyển từ Gazebo/Ignition sang phần cứng thật.
+Công cụ mã hoá các cạm bẫy thường gặp khi hệ thống multi-robot chuyển từ mô phỏng sang phần
+cứng thật. Nó là **heuristic**, không phải chứng minh hình thức: hãy đọc finding như một danh
+sách "nên xem lại chỗ này", không phải phán quyết.
 
-## 3 cách chạy
+## Cách chạy
 
 ```bash
-# 1. Script độc lập — không cần cài gì ngoài Python 3 chuẩn
-python3 multirobot_lint.py ./src --format text
-python3 multirobot_lint.py ./src --fix              # tự áp fix an toàn
-python3 multirobot_lint.py ./src --checks 1,6,8      # chỉ chạy check cụ thể
-python3 multirobot_lint.py --list-checks             # xem danh sách check
+python3 multirobot_lint.py ./src                          # quét, in text
+python3 multirobot_lint.py ./src --fix                    # tự áp fix an toàn (xem bên dưới)
+python3 multirobot_lint.py ./src --checks 1,6,8           # chỉ vài check
+python3 multirobot_lint.py ./src --exclude 'third_party/*' --exclude 'gen_*.py'
+python3 multirobot_lint.py ./src --include-tests          # quét cả code test
+python3 multirobot_lint.py ./src --fail-on error          # chỉ fail khi có error
+python3 multirobot_lint.py ./src --format github          # annotation cho GitHub Actions
+python3 multirobot_lint.py --list-checks
 
-# 2. Qua CLI ros2mcp (không cần rclpy dù các subcommand khác của cli.py cần)
-ros2mcp lint-multirobot ./src --fix
-ros2mcp lint-list-checks
-
-# 3. Qua MCP tool (Claude Desktop / Claude Code)
-scan_multirobot_pitfalls(path="./src", fix=false)
+ros2mcp lint-multirobot ./src --fix                       # qua CLI (cần patch cli.py, xem CHANGES.md)
+scan_multirobot_pitfalls(path="./src", fix=false)         # qua MCP tool
 ```
 
-Thoát với exit code `1` nếu còn finding severity `warning`/`error` chưa được fix —
-dùng được thẳng làm CI gate (xem mục "Tích hợp CI" bên dưới).
+Exit code: `0` sạch · `1` còn finding có severity ≥ `--fail-on` (mặc định `warning`) chưa fix ·
+`2` một check bị lỗi nội bộ (xem `report["errors"]`).
+
+Mặc định, khi quét **thư mục**, code test (`test/`, `tests/`, `test_*.py`, `*_test.cpp`…) bị bỏ
+qua vì test hay publish `cmd_vel` không dừng, đặt domain id lạ… Quét **một file cụ thể** thì luôn
+quét. Thư mục `build/ install/ log/ venv/ .git/ node_modules/`… chỉ bị bỏ khi nằm *bên dưới* thư
+mục gốc bạn quét (project nằm dưới `~/build/…` vẫn quét bình thường). File > 2 MB bị bỏ qua.
 
 ## Danh sách 9 check
 
 | ID | Mô tả | Severity | Tự sửa được? |
 |----|-------|----------|---------------|
-| 1 | Timeout/staleness so sánh bằng thời điểm *nhận* thay vì `header.stamp` | warning | ✓ (chèn TODO) |
-| 2 | Cờ bất thường (function trả `False`) chỉ bị log, không được xử lý ở nơi gọi | warning | ✓ (chèn TODO) |
-| 3 | Hằng số rate-limit/vận tốc không tham chiếu tới thông số phần cứng thật | info | ✓ (chèn TODO) |
-| 4 | Ngưỡng an toàn nhỏ hơn 2× bán kính robot đã khai báo | warning | ✓ (chèn TODO) |
-| 5 | Hàm ước lượng "vùng tự do"/corridor thiếu disclaimer "đây là ước lượng" | info | ✓ (chèn thẳng vào docstring) |
-| 6 | `robot_radius`/margin bị set = 0 tại nơi gọi, ghi đè default an toàn của class | warning | ✓ (chèn TODO) |
-| 7 | Code reset dùng API mô phỏng (Gazebo/Ignition) bị gọi từ luồng robot thật | warning | ✗ (cần người xác nhận) |
-| 8 | Node publish `cmd_vel` không tự gửi vận tốc 0 khi shutdown/crash | warning | ✗ (cần người thêm handler) |
-| 9 | `ROS_DOMAIN_ID`/`RMW_IMPLEMENTATION` không nhất quán giữa các file trong repo | error | ✗ (cần người thống nhất giá trị) |
+| 1 | Timeout/staleness tính từ thời điểm *nhận* thay vì `header.stamp` (file có dùng `header.stamp` → chỉ `info`) | warning / info | ✓ (chèn TODO) |
+| 2 | Hàm trả `True`/`False` kiểu health-check (tên có `check/valid/verify/detect/safe/…`) bị **bỏ kết quả** ở nơi gọi | warning | ✓ (chèn TODO) |
+| 3 | Hằng số giới hạn vận tốc/gia tốc (`MAX_*_VEL`, `LIMIT_ACCEL`, `V_MAX`…) không tham chiếu tới phần cứng | info | ✓ (chèn TODO) |
+| 4 | Ngưỡng an toàn nhỏ hơn 2× bán kính robot lớn nhất trong file (bỏ qua tên sensor/lidar/factor…) | warning | ✓ (chèn TODO) |
+| 5 | Hàm ước lượng vùng tự do/clearance/corridor thiếu disclaimer "đây là ước lượng" | info | ✓ (chèn vào docstring) |
+| 6 | `*radius*`/`*margin*` bị set = 0 tại nơi gọi, ghi đè default của class (kể cả kw-only) | warning | ✓ (chèn TODO) |
+| 7 | Script "real" (token `real` riêng, không phải `realsense`) tham chiếu code reset mô phỏng Gazebo | warning | ✗ |
+| 8 | Node publish `cmd_vel`/`Twist` (Python hoặc C++) không publish vận tốc 0 ở đường shutdown | warning (C++: info) | ✗ |
+| 9 | `ROS_DOMAIN_ID`/`RMW_IMPLEMENTATION` không nhất quán | **error** nếu cùng 1 file · warning nếu giữa các file | ✗ |
 
-Chỉ severity `error` (hiện tại chỉ có check 9) làm hard-fail `colcon test` mặc định —
-xem lý do trong `test/test_multirobot_lint_self.py`.
+**Check 8** nhận diện đường shutdown bằng AST: `finally`, `except KeyboardInterrupt`,
+`destroy_node/on_shutdown/__del__/shutdown/cleanup`, callback đăng ký qua `on_shutdown`/
+`atexit.register`/`signal.signal`, và cho phép 1 bước gọi hàm helper (`finally: node.stop()`).
+C++ chỉ có heuristic mức `info` và bỏ qua header (`.hpp/.h`, thường là lớp wrapper).
+
+**Check 9** đọc `export X=1`, `X: 1`, `os.environ['X'] = '1'`, `SetEnvironmentVariable('X','1')`,
+`setenv/putenv`. Bỏ qua dòng comment và ví dụ trong docstring, không tính `os.environ.get('X', '0')`.
+Khác giá trị giữa các file là **hợp lệ** nếu bạn dùng mỗi robot một domain hoặc sim/real khác RMW,
+vì vậy đó chỉ là `warning` — `colcon test` chỉ fail khi 1 file tự mâu thuẫn.
+
+## Tắt finding (áp dụng cho MỌI check, kể cả loại không tự sửa được)
+
+```python
+self.pub = self.create_publisher(Twist, "cmd_vel", 10)  # cạnh dòng đó (trên 2 dòng / dưới 1 dòng):
+# LINT-IGNORE[multirobot:8] safety_stopper node gửi lệnh dừng
+
+# LINT-DISABLE[multirobot:9] mỗi robot một domain   <- bất kỳ đâu trong file: tắt check 9 cho file đó
+```
+
+Hoặc `--exclude GLOB`. Marker `LINT[multirobot:N] TODO` do `--fix` chèn cũng làm lần quét sau không
+báo lại dòng đó (giống `# noqa`).
 
 ## Nguyên tắc `--fix`
 
-`--fix` **chỉ** áp dụng các sửa đổi an toàn về mặt cơ học: chèn comment TODO, chèn/mở
-rộng docstring disclaimer, không bao giờ tự đổi giá trị số hay logic điều khiển. Với
-các check cần biết số liệu vật lý thật (bán kính robot thật, giới hạn động cơ thật...),
-tool **không tự bịa số** — nó cắm một TODO đúng vị trí và để người quyết định.
-
-Sau khi một dòng đã có TODO (marker `LINT[multirobot:N]`), lần quét sau sẽ **không**
-báo lại dòng đó nữa — giống quy ước `# noqa`. Đây là chủ đích: một khi người đã thấy
-và quyết định tạm hoãn, tool không nên khiến CI fail vĩnh viễn vì một hằng số mà chính
-repo không thể tự biết đáp số.
+Chỉ chèn comment TODO / disclaimer docstring; **không bao giờ** đổi giá trị số hay logic. Thêm:
+- mỗi file sửa xong được `compile()` lại, hỏng thì **không ghi**;
+- giữ nguyên BOM và kiểu xuống dòng (CRLF/LF); file dùng CR đơn lẻ bị bỏ qua;
+- không chèn vào bên trong chuỗi nhiều dòng hay sau dòng kết thúc bằng `\`;
+- một dòng dính nhiều finding chỉ nhận một comment; chạy lần 2 không đổi gì (idempotent).
 
 ## Tích hợp CI
 
-### Lớp 1 — script độc lập
-Đã có sẵn, dùng ngay: `python3 multirobot_lint.py .`
-
-### Lớp 2 — `colcon test`
-Package này đã là một `ament_python` package (`package.xml` + `setup.py`).
-`test/test_multirobot_lint_self.py` được `colcon test`/pytest tự động chạy, dùng
-chính `multirobot_lint.run()` quét lại package. Chỉ finding severity `error` mới làm
-test fail; `warning`/`info` được in ra log nhưng không chặn build (xem docstring của
-file test để biết lý do thiết kế).
-
-```bash
-colcon build --packages-select ros2_mcp_tools
-colcon test --packages-select ros2_mcp_tools
-colcon test-result --verbose
-```
-
-### Lớp 3 — GitHub Actions
-Xem `.github/workflows/multirobot-lint.yml` — chạy trên mọi PR/push vào `main`,
-report-only (không tự `--fix` và commit ngược lại nhánh PR, để tránh thay đổi code
-người dùng ngoài ý muốn trong CI).
+1. **Script độc lập:** `python3 multirobot_lint.py .`
+2. **`colcon test`:** `test/test_multirobot_lint_self.py` quét chính package; chỉ `error` và lỗi nội
+   bộ làm fail. `warning/info` được in ra log.
+3. **GitHub Actions:** `.github/workflows/multirobot-lint.yml` chạy test + lint, xuất annotation,
+   upload báo cáo JSON; không tự `--fix` rồi commit ngược.
 
 ## Giới hạn đã biết
 
-- Đây là phân tích heuristic (AST + regex), không phải type-checker hay formal
-  verification — có thể có false negative (bỏ sót) trên code viết theo phong cách khác
-  lạ, và false positive hiếm gặp trên code trùng tên biến ngẫu nhiên.
-- Check 1/2/6 dựa trên nhận diện pattern tên biến/hàm (`last_*_time`, hàm trả
-  `True`/`False`...) — nếu codebase đặt tên khác quy ước, có thể cần điều chỉnh regex
-  trong `multirobot_lint.py`.
-- Check 7 chỉ nhận diện qua tên file chứa "real"/"reset" — không đọc hiểu ngữ nghĩa
-  launch file đầy đủ.
+- Heuristic: check 1/3/4 dựa trên quy ước đặt tên; có thể có false negative với code đặt tên khác
+  và false positive hiếm. Dùng `LINT-IGNORE` thay vì sửa regex khi gặp false positive.
+- Check 8 không theo dõi luồng gọi xuyên file: thư viện publish `cmd_vel` còn node gọi nó xử lý dừng ở
+  file khác sẽ bị báo — hãy `LINT-IGNORE` kèm lý do.
+- C++ mới có check 8 (info) và 9; các check còn lại chỉ phân tích Python.
+- ROS1 (`rospy`) không được hỗ trợ.

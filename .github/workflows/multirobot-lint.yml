@@ -1,10 +1,7 @@
 name: multirobot-lint
 
-# Static, no-ROS2-required scan for known ROS2 multi-robot sim-to-real
-# pitfalls (see MULTIROBOT_LINT.md at the repo root). Runs on every PR and on
-# pushes to main. Report-only by default — this workflow never runs --fix and
-# commits back to the PR branch, so it can't silently change someone's code
-# in CI; it only fails the check if unresolved warning/error findings remain.
+# Static, no-ROS2-required scan for known ROS2 multi-robot sim-to-real pitfalls
+# (see MULTIROBOT_LINT.md). Report-only: never runs --fix and commits back.
 
 on:
   pull_request:
@@ -24,10 +21,15 @@ jobs:
         with:
           python-version: "3.10"
 
-      - name: Run multirobot_lint (report only)
-        id: lint
-        run: |
-          python3 multirobot_lint.py . --format text --output multirobot-lint-report.json
+      - name: Install test dependencies
+        run: pip install "mcp<3" pyyaml pytest
+
+      - name: Unit tests (linter + server logic against a fake rclpy)
+        run: python3 -m pytest test -q
+
+      - name: Write full JSON report (never fails the job)
+        if: always()
+        run: python3 multirobot_lint.py . --format json --fail-on never --output multirobot-lint-report.json > /dev/null
 
       - name: Upload full JSON report
         if: always()
@@ -36,3 +38,6 @@ jobs:
           name: multirobot-lint-report
           path: multirobot-lint-report.json
           if-no-files-found: ignore
+
+      - name: Gate (annotations on the PR; fails on unresolved warning/error)
+        run: python3 multirobot_lint.py . --format github
